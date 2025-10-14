@@ -1,1 +1,69 @@
-.venv
+# Ignore build, data, and environment files
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pkl
+*.log
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+*.env
+
+# ---- OS / IDE files ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ---- Data & Indexes ----
+data/
+indexes/
+reports/
+*.faiss
+*.index
+*.jsonl
+*.csv
+*.tsv
+*.pdf
+
+# ---- Model artifacts ----
+*.bin
+*.h5
+*.pt
+*.pth
+*.ckpt
+models/
+checkpoints/
+
+# ---- Cache & temp ----
+.cache/
+tmp/
+temp/
+__pycache__/
+*.tmp
+
+# ---- Streamlit & Logs ----
+.streamlit/
+.streamlit_secrets.toml
+*.log
+logs/
+
+# ---- Notebook checkpoints ----
+.ipynb_checkpoints/
+*.ipynb
+
+# ---- Credentials ----
+.env
+.env.*
+*.pem
+*.key
+*.json  # avoid committing API or service account keys
+
+# ---- System files ----
+Thumbs.db
