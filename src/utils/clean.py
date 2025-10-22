@@ -31,6 +31,7 @@ HEADER_FOOTER_PATTERNS = [
     re.compile(r"^\s*arxiv.*$", re.IGNORECASE),
     re.compile(r"^\s*copyright.*$", re.IGNORECASE),
 ]
+CITATION_LINE_PATTERN = re.compile(r"^\s*\[\d+\]\s+")
 WHITESPACE_RE = re.compile(r"[ \t]+")
 BLANK_LINE_RE = re.compile(r"\n{2,}")
 
@@ -74,6 +75,8 @@ def clean_text(raw: str) -> str:
         if any(pattern.match(stripped) for pattern in PAGE_NUMBER_PATTERNS):
             continue
         if any(pattern.match(stripped) for pattern in HEADER_FOOTER_PATTERNS):
+            continue
+        if CITATION_LINE_PATTERN.match(stripped):
             continue
 
         normalized = WHITESPACE_RE.sub(" ", stripped)
