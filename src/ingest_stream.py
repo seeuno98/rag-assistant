@@ -42,6 +42,15 @@ from utils.clean import clean_text
 logger = logging.getLogger(__name__)
 
 
+def _safe_text(value: Any) -> str:
+    """Ensure text is UTF-8 encodable by replacing invalid surrogate sequences."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    return value.encode("utf-8", "replace").decode("utf-8")
+
+
 def pdf_text_from_url(url: str, timeout: int = 90) -> str:
     """
     Download a PDF from a URL and extract its full text.
@@ -86,7 +95,7 @@ def pdf_text_from_url(url: str, timeout: int = 90) -> str:
     return "\n\n".join(pages_text)
 
 
-def chunk_text(text: str, source: str, chunk_size: int = 800, chunk_overlap: int = 200) -> list[dict]:
+def chunk_text(text: str, source: str, chunk_size: int = 1200, chunk_overlap: int = 300) -> list[dict]:
     """
     Split a large document text into overlapping text chunks for embedding.
 
@@ -132,7 +141,7 @@ def chunk_text(text: str, source: str, chunk_size: int = 800, chunk_overlap: int
     return chunks
 
 
-def stream_and_chunk(papers_meta: list[dict], chunk_size: int = 800, chunk_overlap: int = 200) -> list[dict]:
+def stream_and_chunk(papers_meta: list[dict], chunk_size: int = 1200, chunk_overlap: int = 300) -> list[dict]:
     """
     Given a list of paper metadata (with PDF URLs), stream each PDF, extract text,
     chunk it, and combine into a flattened list of text chunks.
@@ -220,20 +229,20 @@ def stream_and_chunk(papers_meta: list[dict], chunk_size: int = 800, chunk_overl
                 chunk_id = idx
 
             chunk_payload: Dict[str, Any] = {
-                "text": text,
-                "source": chunk.get("source") or source,
+                "text": _safe_text(text),
+                "source": _safe_text(chunk.get("source") or source),
                 "chunk_id": chunk_id,
             }
 
             if paper.get("title"):
-                chunk_payload["title"] = paper["title"]
+                chunk_payload["title"] = _safe_text(paper["title"])
 
             arxiv_identifier = paper.get("arxiv_id") or paper.get("id")
             if arxiv_identifier:
-                chunk_payload["arxiv_id"] = arxiv_identifier
+                chunk_payload["arxiv_id"] = _safe_text(arxiv_identifier)
 
             if paper.get("updated"):
-                chunk_payload["updated"] = paper["updated"]
+                chunk_payload["updated"] = _safe_text(paper["updated"])
 
             all_chunks.append(chunk_payload)
 
@@ -283,7 +292,11 @@ def _write_chunks(chunks: List[dict], output_path: Path) -> None:
 
     with output_path.open("w", encoding="utf-8") as handle:
         for chunk in chunks:
-            handle.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+            sanitized = {
+                key: _safe_text(value) if isinstance(value, str) else value
+                for key, value in chunk.items()
+            }
+            handle.write(json.dumps(sanitized, ensure_ascii=False) + "\n")
 
 
 def _parse_args() -> argparse.Namespace:
