@@ -25,6 +25,7 @@ ENV/
 data/
 indexes/
 reports/
+artifacts/
 *.faiss
 *.index
 *.jsonl
@@ -48,9 +49,7 @@ temp/
 __pycache__/
 *.tmp
 
-# ---- Streamlit & Logs ----
-.streamlit/
-.streamlit_secrets.toml
+# ---- Logs ----
 *.log
 logs/
 
