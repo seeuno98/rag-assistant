@@ -22,7 +22,5 @@ jobs:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
-          EMAIL_SMTP_HOST: ${{ secrets.EMAIL_SMTP_HOST }}
-          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT }}
         run: |
           python src/scheduler_daily.py
