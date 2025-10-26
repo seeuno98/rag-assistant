@@ -233,11 +233,15 @@ def send_email(subject: str, text_body: str, html_body: str) -> None:
     if not all([sender, password, receiver]):
         print("Email not sent: missing EMAIL_SENDER/EMAIL_PASSWORD/EMAIL_RECEIVER")
         return
+    recipients = [r.strip() for r in receiver.split(",") if r.strip()]
+    if not recipients:
+        print("Email not sent: EMAIL_RECEIVER did not contain any addresses.")
+        return
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = sender
-    msg["To"] = receiver
+    msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(text_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
@@ -247,7 +251,7 @@ def send_email(subject: str, text_body: str, html_body: str) -> None:
         server.starttls(context=context)
         server.ehlo()
         server.login(sender, password)
-        server.sendmail(sender, [receiver], msg.as_string())
+        server.sendmail(sender, recipients, msg.as_string())
 
 
 def extract_answer(summary_text: str) -> str:
