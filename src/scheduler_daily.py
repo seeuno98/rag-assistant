@@ -64,61 +64,67 @@ def topic_from_query(q: str) -> str:
     return t.rstrip(".")[:120]
 
 
-def render_inline_markdown(text: str) -> str:
-    escaped = html.escape(text or "")
-    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+SUMMARY_ITEM_PATTERN = re.compile(
+    r"<li[^>]*>\s*<b>\s*<a href=\"([^\"]+)\"[^>]*>(.*?)</a>\s*</b>\s*:\s*(.*?)</li>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
-def build_digest_text(papers, topic: str, run_dt: datetime, answer: str) -> str:
+def parse_summary_items(answer_html: str) -> list[dict]:
+    items: list[dict] = []
+    if not answer_html:
+        return items
+    for match in SUMMARY_ITEM_PATTERN.finditer(answer_html):
+        url = match.group(1).strip()
+        title = html.unescape(match.group(2).strip())
+        raw_summary = match.group(3).strip()
+        clean_summary = html.unescape(re.sub(r"<[^>]+>", "", raw_summary)).strip()
+        items.append({"title": title, "url": url, "summary": clean_summary})
+    return items
+
+
+def build_digest_text(summary_items: list[dict], topic: str, run_dt: datetime, fallback: str | None = None) -> str:
     lines: list[str] = []
     lines.append(f"[Daily RAG Digest] {run_dt:%A} – {topic}")
     lines.append("")
-    if answer:
-        lines.append("Summary:")
-        lines.append(answer)
-        lines.append("")
-    lines.append(f"{len(papers)} new papers summarized:")
-    for i, paper in enumerate(papers, 1):
-        title = paper.get("title") or "Untitled"
-        url = paper.get("url") or ""
-        summary = paper.get("summary") or ""
-        lines.append(f"{i}. {title}")
-        if url:
-            lines.append(f"   {url}")
-        if summary:
-            lines.append(f"   – {summary}")
+    lines.append("Summary:")
+    if summary_items:
+        for item in summary_items:
+            bullet = f"- {item['title']}: {item['summary']}"
+            if item.get("url"):
+                bullet += f" ({item['url']})"
+            lines.append(bullet)
+    elif fallback:
+        clean = html.unescape(re.sub(r"<[^>]+>", "", fallback))
+        lines.append(clean)
+    else:
+        lines.append("No structured summary available.")
     return "\n".join(lines)
 
 
-def build_digest_html(papers, topic: str, run_dt: datetime, answer: str) -> str:
+def build_digest_html(summary_items: list[dict], topic: str, run_dt: datetime, fallback: str | None = None) -> str:
     safe_topic = html.escape(topic)
     date_str = html.escape(run_dt.strftime("%A, %b %d, %Y"))
-    rows = []
-    for i, paper in enumerate(papers, 1):
-        title = html.escape(paper.get("title") or "Untitled")
-        url = paper.get("url") or ""
-        summary_text = render_inline_markdown(paper.get("summary") or "")
-        link = (
-            f'<a href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">{title}</a>'
-            if url
-            else title
-        )
-        summary_block = f'<div style="margin-top:4px;">{summary_text}</div>' if summary_text else ""
-        rows.append(
-            f"""
-          <li style=\"margin-bottom:12px; line-height:1.4;\">
-            <div style=\"font-weight:600;\">{link}</div>
-            {summary_block}
-          </li>
-        """
-        )
-    items = "\n".join(rows)
-    answer_html = render_inline_markdown(answer).replace("\n", "<br>")
-    summary_block = (
-        f"<div style=\"margin-bottom:20px;\"><h2 style=\"font-size:16px;margin:0 0 8px 0;\">Summary</h2><div>{answer_html}</div></div>"
-        if answer
-        else ""
-    )
+    if summary_items:
+        bullet_entries: list[str] = []
+        for item in summary_items:
+            title = html.escape(item.get("title") or "Untitled")
+            summary = html.escape(item.get("summary") or "")
+            url = item.get("url") or ""
+            if url:
+                url = html.escape(url)
+                bullet_entries.append(
+                    f'<li style="margin-bottom:12px; line-height:1.5;"><b><a href="{url}" target="_blank" rel="noopener noreferrer">{title}</a></b>: {summary}</li>'
+                )
+            else:
+                bullet_entries.append(
+                    f'<li style="margin-bottom:12px; line-height:1.5;"><b>{title}</b>: {summary}</li>'
+                )
+        bullet_html = "\n".join(bullet_entries)
+    elif fallback:
+        bullet_html = f'<li style="margin-bottom:12px; line-height:1.5;">{html.escape(fallback)}</li>'
+    else:
+        bullet_html = '<li style="margin-bottom:12px; line-height:1.5;">No structured summary available.</li>'
 
     return f"""<!doctype html>
     <html>
@@ -130,10 +136,10 @@ def build_digest_html(papers, topic: str, run_dt: datetime, answer: str) -> str:
             <tr><td>
               <h1 style=\"margin:0 0 8px 0;font-size:20px;\">Daily RAG Digest — {safe_topic}</h1>
               <div style=\"color:#666;font-size:12px;margin-bottom:16px;\">{date_str}</div>
-              {summary_block}
-              <ol style=\"padding-left:18px;margin:0;\">
-                {items}
-              </ol>
+              <h2 style=\"font-size:16px;margin:0 0 12px 0;\">Summary</h2>
+              <ul style=\"padding-left:18px;margin:0;list-style-type:disc;\">
+                {bullet_html}
+              </ul>
               <hr style=\"margin:20px 0;border:none;border-top:1px solid #eee;\">
               <div style=\"font-size:12px;color:#666;\">
                 You’re receiving this because you enabled the GitHub Action for daily research summaries.
@@ -299,20 +305,30 @@ def run_daily_job(days_back: int = 1, dry_run: bool = False) -> None:
 
     run_dt = datetime.now(timezone.utc)
     topic = topic_from_query(query)
-    answer = extract_answer(summary_text)
+    summary_items = parse_summary_items(summary_text)
+    fallback_summary = summary_text if summary_items else None
 
     logger.info("[SAVE] Writing digest to reports directory")
     reports_dir = Path("reports")
     reports_dir.mkdir(parents=True, exist_ok=True)
     digest_path = reports_dir / f"{run_dt.date().isoformat()}-llm-digest.md"
-    digest_body = answer if answer else summary_text
+    if summary_items:
+        bullet_lines = [
+            f"- [{item['title']}]({item['url']}): {item['summary']}"
+            if item.get("url")
+            else f"- {item['title']}: {item['summary']}"
+            for item in summary_items
+        ]
+        digest_body = "Summary:\n" + "\n".join(bullet_lines)
+    else:
+        digest_body = fallback_summary or "No structured summary available."
     digest_content = f"# 🧠 LLM Research Digest — {run_dt.date().isoformat()}\n\n{digest_body}\n"
     digest_path.write_text(digest_content, encoding="utf-8")
     logger.info("[SAVE] Digest written to %s", digest_path)
 
-    subject = f"[Daily RAG Digest] {run_dt:%A} - {topic}"
-    text_body = build_digest_text(prepared_papers, topic, run_dt, answer)
-    html_body = build_digest_html(prepared_papers, topic, run_dt, answer)
+    subject = f"[Daily RAG Digest] {run_dt:%A} – {topic}"
+    text_body = build_digest_text(summary_items, topic, run_dt, fallback_summary)
+    html_body = build_digest_html(summary_items, topic, run_dt, fallback_summary)
 
     if dry_run:
         artifacts_dir = Path("artifacts")
