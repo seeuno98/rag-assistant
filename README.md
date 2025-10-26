@@ -10,16 +10,20 @@ This project demonstrates how to combine **retrieval**, **generation**, and **au
 
 ---
 ## 📑 Table of Contents
-- [Features](#-features)
-- [Tech Stack](#-tech-stack)
-- [Project Structure](#-project-structure)
-- [Installation](#-installation)
-- [Quick Start](#-quick-start)
-- [Automation](#-automation)
-- [Roadmap](#-roadmap)
-- [License](#-license)
-- [Acknowledgements](#-acknowledgements)
-- [About This Project](#-about-this-project)
+- [🚀 Features](#-features)
+- [🧰 Tech Stack](#-tech-stack)
+- [🧩 Project Structure](#-project-structure)
+- [⚙️ Installation](#-installation)
+- [🔄 Model Provider Update](#-model-provider-update)
+- [🤖 Why GPT-4o-mini](#-why-gpt4omini)
+- [🧠 Quick Start](#-quick-start)
+- [🧪 Quick Module Tests](#-quick-module-tests)
+- [📬 Automated Research Digest](#-automated-research-digest)
+- [⚡ Automation](#-automation)
+- [📈 Roadmap](#-roadmap)
+- [🪪 License](#-license)
+- [🌟 Acknowledgements](#-acknowledgements)
+- [💬 About This Project](#-about-this-project)
 
 ---
 
@@ -45,7 +49,7 @@ This project demonstrates how to combine **retrieval**, **generation**, and **au
 | PDF Parsing | `pypdf`, `requests` |
 | NLP Models | `sentence-transformers`, `transformers` |
 | Vector Store | FAISS / Pinecone |
-| LLM Backend | OpenAI GPT-4o / Hugging Face Inference API |
+| LLM Backend | OpenAI GPT-4o-mini (default) / Hugging Face (facebook/bart-large-cnn only for testing) |
 | Frontend | `streamlit` |
 | Automation | `cron` / GitHub Actions (daily refresh) |
 | Optional | `LangChain`, `LlamaIndex`, `vLLM`, `Weights & Biases` |
@@ -95,6 +99,23 @@ EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
 ```
 ---
 
+## 🔄 Model Provider Update
+
+- During experimentation we found that only `facebook/bart-large-cnn` worked reliably on the free Hugging Face Inference API. Other popular options—Zephyr, Mistral, Gemma—require paid or private hosting and returned 404/403 errors for free-tier tokens.
+- To guarantee stable and higher-context summarization, the project now defaults to the OpenAI Chat Completions API with `gpt-4o-mini`.
+- Hugging Face support is still in place for lightweight regression testing, but OpenAI is now the recommended provider for day-to-day summaries.
+
+🧩 Note: gpt-5-nano may return empty responses on long-context RAG queries. Use gpt-4o-mini or gpt-4o instead for consistent performance.
+
+## 🤖 Why GPT-4o-mini
+
+OpenAI's gpt-4o-mini is now the default summarizer because it balances cost, speed, and context length:
+- **Cheaper** than GPT-4-class models for day-to-day digests.
+- **Faster** latency, which keeps scheduled jobs responsive.
+- **Good enough** for concise summaries without the overhead of GPT-4o-mini.
+
+For deeper analysis or more nuanced reasoning you can still swap to larger models (e.g., GPT-4o-mini) via the `--provider openai` flag and the `OPENAI_MODEL_ID` environment variable.
+
 
 ## 🧠 Quick Start
 
@@ -114,7 +135,7 @@ python src/embed_index.py
 
 4. Ask Questions
 ```bash
-python src/rag_answer.py
+python src/rag_answer.py --provider openai --model gpt-4o-mini --query "Summarize latest LLM retrieval methods."
 ```
 
 or run the interactive Streamlit app:
@@ -123,6 +144,94 @@ streamlit run app.py
 ```
 
 Then visit 👉 [http://localhost:8501](http://localhost:8501) to explore the Streamlit research assistant UI.
+
+## 🧪 Quick Module Tests
+Each module can be tested independently before running the full pipeline.
+
+
+<details>
+<summary>Click to expand</summary>
+
+### 1. Fetch Papers
+```bash
+python src/fetch_arxiv.py --query "large language model" --days-back 3 --max-results 20 --output data/arxiv_results.json
+```
+
+### 2. Ingest & Chunk
+```bash
+python src/ingest_stream.py --input data/arxiv_results.json --limit 20 --output data/chunks.jsonl
+# OR
+python src/ingest_stream.py --input data/arxiv_results.json --chunk-size 1200 --chunk-overlap 300 --output data/chunks.jsonl
+
+```
+
+### 3. Build & Search Index
+```bash
+# Build FAISS index
+python src/embed_index.py --build --input data/chunks.jsonl --index-path indexes/faiss.index --metadata-path indexes/docs_meta.json
+
+# Search it
+python src/embed_index.py --search "What are recent techniques for retrieval-augmented generation?" --k 5
+
+```
+
+### 4. Ask a Question
+
+💡 Environment Variables Note
+
+You can define your API keys in a local .env file so you don’t need to prefix commands each time.
+```bash
+# Example .env
+OPENAI_API_KEY=sk-xxxx
+HF_TOKEN=hf_xxx
+```
+
+✅ The script will automatically detect the API key from .env.
+
+💡 To temporarily override or use a different key, prefix the command:
+
+
+```bash
+# Using OpenAI GPT-4o-mini (default)
+OPENAI_API_KEY=sk-xxxx python src/rag_answer.py --provider openai --model gpt-4o-mini --query "Summarize latest LLM retrieval methods."
+
+# Legacy Hugging Face testing only (facebook/bart-large-cnn)
+HF_TOKEN=hf_xxx python src/rag_answer.py --provider hf --query "Summarize latest LLM retrieval methods."
+
+> Note: `--provider hf` is kept only for regression testing with `facebook/bart-large-cnn`. All production runs should use `--provider openai`.
+```
+
+### 5. Run Daily Digest
+```bash
+python src/scheduler_daily.py --days-back 1 --dry-run
+```
+
+Full scheduler run (writes reports/YYYY-MM-DD-llm-digest.md): 
+
+```bash
+OPENAI_API_KEY=sk-xxxx python src/scheduler_daily.py --days-back 1
+```
+
+</details>
+
+## 📬 Automated Research Digest
+
+- Runs automatically at **09:00 UTC** via the GitHub Actions workflow in `.github/workflows/daily_digest.yml`.
+- Weekday rotation (UTC):
+  - **Monday:** Summarize latest LLM retrieval methods.
+  - **Tuesday:** Summarize latest multi-modal LLM research.
+  - **Wednesday:** Summarize latest LLM fine-tuning and alignment papers.
+  - **Thursday:** Summarize latest reinforcement learning or policy optimization in LLMs.
+  - **Friday:** Summarize latest evaluation benchmarks for large language models.
+  - **Saturday:** Summarize latest LLM efficiency and inference optimization research.
+  - **Sunday:** Summarize latest applications of LLMs in reasoning and agents.
+- Email delivery uses the following GitHub Secrets (all required unless noted):
+  - `OPENAI_API_KEY`
+  - `EMAIL_SENDER`
+  - `EMAIL_PASSWORD`
+  - `EMAIL_RECEIVER`
+  - Optional overrides: `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`
+- Each digest is sent as a multipart message (plain text + HTML) with the daily summary attached.
 
 ## ⚡ Automation
 
@@ -135,7 +244,7 @@ Run python src/scheduler_daily.py on a daily cron to:
 
 - Rebuild embeddings
 
-- Generate a new LLM Research Digest in /reports/
+- Generate a new LLM Research Digest in /reports/ (summaries generated with OpenAI gpt-4o-mini)
 
 
 ### Example GitHub Action (cron.yaml)
@@ -156,7 +265,6 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python src/scheduler_daily.py
 ```
-
 
 ## 📈 Roadmap
 
@@ -180,11 +288,11 @@ This project is licensed under the MIT License.
 ## 🌟 Acknowledgements
 
 - [Sentence-Transformers](https://www.sbert.net)
-- [LangChain](https://www.langchain.com)
-- [Hugging Face Transformers](https://huggingface.co)
 - [OpenAI API](https://platform.openai.com)
 - [arXiv.org](https://arxiv.org)
-
+- [facebook/bart-large-cnn](https://huggingface.co/facebook/bart-large-cnn) — legacy summarizer used for Hugging Face regression tests.
+- [Hugging Face Transformers](https://huggingface.co)
+- [Hugging Face Inference API](https://huggingface.co/docs/api-inference) — used for model hosting and inference.
 ---
 
 ## 💬 About This Project

@@ -97,8 +97,6 @@ def fetch_llm_papers(query: str, days_back: int = 3, max_results: int = 20) -> l
     for entry in root.findall("atom:entry", XML_NAMESPACES):
         updated_text = entry.findtext("atom:updated", default="", namespaces=XML_NAMESPACES).strip()
         updated_dt = _parse_atom_datetime(updated_text)
-        if updated_dt and updated_dt < threshold:
-            continue
 
         authors = [
             author.findtext("atom:name", default="", namespaces=XML_NAMESPACES).strip()
@@ -135,12 +133,20 @@ def fetch_llm_papers(query: str, days_back: int = 3, max_results: int = 20) -> l
         papers.append(paper)
 
     if days_back > 0:
-        papers = [
-            paper
-            for paper in papers
-            if not paper["updated"]
-            or (_parse_atom_datetime(paper["updated"]) or threshold) >= threshold
-        ]
+        filtered: List[dict] = []
+        for paper in papers:
+            updated_value = paper.get("updated", "")
+            updated_dt = _parse_atom_datetime(updated_value) if updated_value else None
+            if not updated_dt or updated_dt >= threshold:
+                filtered.append(paper)
+
+        if filtered:
+            return filtered
+
+        if papers:
+            print(
+                f"No papers matched days_back={days_back}; returning the most recent {len(papers)} results instead."
+            )
 
     return papers
 
