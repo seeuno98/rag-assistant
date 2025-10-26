@@ -35,7 +35,6 @@ This project demonstrates how to combine **retrieval**, **generation**, and **au
 - **Semantic Retrieval** – Retrieves the most relevant paper segments via FAISS or Pinecone vector stores.
 - **LLM Response Generation** – Combines retrieved research context with an LLM (OpenAI or Hugging Face) for accurate answers and summaries.
 - **Automated Daily Digest** – Generates a concise markdown summary (“LLM Research Digest”) of new papers each day.
-- **Interactive UI** – Streamlit web app for live research Q&A and visualization.
 - **Cloud-First Workflow** – Streams data from arXiv (no local raw file storage needed).
 
 ---
@@ -50,9 +49,7 @@ This project demonstrates how to combine **retrieval**, **generation**, and **au
 | NLP Models | `sentence-transformers`, `transformers` |
 | Vector Store | FAISS / Pinecone |
 | LLM Backend | OpenAI GPT-4o-mini (default) / Hugging Face (facebook/bart-large-cnn only for testing) |
-| Frontend | `streamlit` |
 | Automation | `cron` / GitHub Actions (daily refresh) |
-| Optional | `LangChain`, `LlamaIndex`, `vLLM`, `Weights & Biases` |
 
 ---
 
@@ -69,7 +66,6 @@ rag-assistant/
 │ └── utils/clean.py # Optional text cleanup helpers
 ├── indexes/ # FAISS index + metadata JSON
 ├── reports/ # Daily LLM Digest markdown files
-├── app.py # Streamlit interface for live QA
 ├── requirements.txt
 ├── .env # API keys and configuration
 └── README.md
@@ -137,13 +133,6 @@ python src/embed_index.py
 ```bash
 python src/rag_answer.py --provider openai --model gpt-4o-mini --query "Summarize latest LLM retrieval methods."
 ```
-
-or run the interactive Streamlit app:
-```bash
-streamlit run app.py
-```
-
-Then visit 👉 [http://localhost:8501](http://localhost:8501) to explore the Streamlit research assistant UI.
 
 ## 🧪 Quick Module Tests
 Each module can be tested independently before running the full pipeline.
