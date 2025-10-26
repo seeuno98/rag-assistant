@@ -1,16 +1,22 @@
 """
 scheduler_daily.py
 -------------------
-Automates the daily RAG pipeline and generates a summarized research digest.
+Automates the daily RAG pipeline end-to-end and dispatches a themed research digest.
+
 Responsibilities:
-- Schedule daily execution (e.g., via cron or GitHub Actions).
-- Run the full pipeline: fetch → ingest → embed → summarize.
-- Generate a markdown "Daily LLM Research Digest" with summaries of newly published papers.
-- Save the digest in ./reports with date-based filenames (e.g., 2025-10-13-llm-digest.md).
+- Rotate through weekday queries to target different LLM sub-domains.
+- Fetch the newest arXiv papers, stream and chunk PDFs, and rebuild the FAISS index.
+- Call rag_answer.py to produce the templated Summary/Overall response used in reports.
+- Parse either HTML or Markdown bullets into structured digest items with links.
+- Write the markdown digest to ./reports/YYYY-MM-DD-llm-digest.md.
+- Optionally email both plain-text and HTML versions (with `--dry-run` capturing artifacts).
+
 Example:
-    $ python src/scheduler_daily.py
+    $ python src/scheduler_daily.py --days-back 1 --dry-run
+
 Output:
     ./reports/YYYY-MM-DD-llm-digest.md
+    ./artifacts/digest.{html,txt} (when --dry-run is supplied)
 """
 
 import argparse
@@ -41,11 +47,23 @@ DAILY_QUERIES = {
 
 
 def get_daily_query() -> str:
-    """Return the scheduled query for the current (UTC) weekday."""
+    """
+    Return the templated summarization query for the current weekday in UTC.
+
+    Returns:
+        str: Scheduler prompt corresponding to the weekday (0=Monday … 6=Sunday).
+    """
     return DAILY_QUERIES[datetime.utcnow().weekday()]
 
 
 def _run_module_main(module, argv: list[str]) -> None:
+    """
+    Import `module` and invoke its `main()` while temporarily overriding `sys.argv`.
+
+    Args:
+        module (str): Module name to import (e.g., "fetch_arxiv").
+        argv (list[str]): Argument vector to expose to the module during execution.
+    """
     mod = __import__(module, fromlist=["main"])
     main_func = getattr(mod, "main")
     argv_backup = sys.argv.copy()
@@ -57,6 +75,15 @@ def _run_module_main(module, argv: list[str]) -> None:
 
 
 def topic_from_query(q: str) -> str:
+    """
+    Convert a scheduler query into a concise digest topic.
+
+    Args:
+        q (str): Full scheduler query string.
+
+    Returns:
+        str: Human-friendly topic text capped at 120 characters.
+    """
     t = q.strip()
     for pref in ("Summarize latest ", "summarize latest "):
         if t.startswith(pref):
@@ -71,6 +98,15 @@ SUMMARY_ITEM_PATTERN = re.compile(
 
 
 def parse_summary_items(answer_html: str) -> list[dict]:
+    """
+    Parse HTML list items produced by `rag_answer.py` into structured summaries.
+
+    Args:
+        answer_html (str): Model response expected to contain `<li>` elements.
+
+    Returns:
+        list[dict]: Each entry contains `title`, `url`, and `summary` keys.
+    """
     items: list[dict] = []
     if not answer_html:
         return items
@@ -84,6 +120,18 @@ def parse_summary_items(answer_html: str) -> list[dict]:
 
 
 def build_digest_text(summary_items: list[dict], topic: str, run_dt: datetime, fallback: str | None = None) -> str:
+    """
+    Render the plain-text digest body shared via email and reports.
+
+    Args:
+        summary_items (list[dict]): Structured summaries from `parse_summary_items`.
+        topic (str): Digest topic label (e.g., "LLM retrieval methods").
+        run_dt (datetime): Execution timestamp (UTC).
+        fallback (str | None): Raw summary text to use when parsing fails.
+
+    Returns:
+        str: Plain-text digest containing heading and bullet list.
+    """
     lines: list[str] = []
     lines.append(f"[Daily RAG Digest] {run_dt:%A} – {topic}")
     lines.append("")
@@ -103,6 +151,18 @@ def build_digest_text(summary_items: list[dict], topic: str, run_dt: datetime, f
 
 
 def build_digest_html(summary_items: list[dict], topic: str, run_dt: datetime, fallback: str | None = None) -> str:
+    """
+    Render the HTML digest body with lightweight styling for email clients.
+
+    Args:
+        summary_items (list[dict]): Structured summaries from `parse_summary_items`.
+        topic (str): Digest topic label.
+        run_dt (datetime): Execution timestamp (UTC).
+        fallback (str | None): Raw summary text to display when parsing fails.
+
+    Returns:
+        str: Sanitized HTML string ready to embed in an email.
+    """
     safe_topic = html.escape(topic)
     date_str = html.escape(run_dt.strftime("%A, %b %d, %Y"))
     if summary_items:
@@ -153,6 +213,17 @@ def build_digest_html(summary_items: list[dict], topic: str, run_dt: datetime, f
 
 
 def send_email(subject: str, text_body: str, html_body: str) -> None:
+    """
+    Deliver the digest email using SMTP with plain-text and HTML alternatives.
+
+    Args:
+        subject (str): Email subject line.
+        text_body (str): Plain-text representation of the digest.
+        html_body (str): HTML representation of the digest.
+
+    Side Effects:
+        Sends email via credentials stored in EMAIL_* environment variables.
+    """
     sender = os.getenv("EMAIL_SENDER")
     password = os.getenv("EMAIL_PASSWORD")
     receiver = os.getenv("EMAIL_RECEIVER")
@@ -180,6 +251,15 @@ def send_email(subject: str, text_body: str, html_body: str) -> None:
 
 
 def extract_answer(summary_text: str) -> str:
+    """
+    Remove the leading "Answer:" marker occasionally emitted by models.
+
+    Args:
+        summary_text (str): Raw stdout captured from `rag_answer.py`.
+
+    Returns:
+        str: Cleaned summary text without the prefix.
+    """
     if not summary_text:
         return ""
     marker = "Answer:"
@@ -189,14 +269,16 @@ def extract_answer(summary_text: str) -> str:
     return summary_text[idx + len(marker) :].strip()
 
 
-def run_daily_job(days_back: int = 1, dry_run: bool = False) -> None:
+def run_daily_job(days_back: int = 6, dry_run: bool = False) -> None:
     """
-    Execute the daily pipeline: fetch new LLM papers, ingest/chunk, build index, and
-    generate a “Daily LLM Research Digest.”
+    Execute the end-to-end daily pipeline and optionally send/email the digest.
+
     Args:
-        days_back (int): How many past days of papers to include in the update.
-    Returns:
-        None
+        days_back (int): Number of historical days to include when fetching papers.
+        dry_run (bool): If True, skip email send and persist artifacts locally.
+
+    Side Effects:
+        Writes artifacts under `data/`, `indexes/`, `reports/`, and optionally `artifacts/`.
     """
     logger = logging.getLogger(__name__)
     logging.basicConfig(level=logging.INFO)
@@ -343,7 +425,11 @@ def run_daily_job(days_back: int = 1, dry_run: bool = False) -> None:
 
 
 def run_daily_summary() -> None:
-    """Temporary stub to invoke rag_answer CLI with a fixed query."""
+    """
+    Backwards-compatible helper that proxies directly to `rag_answer.py`.
+
+    Invokes the current daily query using the OpenAI provider and prints the result.
+    """
     query = get_daily_query()
     _run_module_main(
         "rag_answer",
@@ -360,8 +446,14 @@ def run_daily_summary() -> None:
 
 
 def _parse_args() -> argparse.Namespace:
+    """
+    Parse CLI arguments controlling the scheduler runtime.
+
+    Returns:
+        argparse.Namespace: Namespace containing `days_back` and `dry_run`.
+    """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days-back", type=int, default=1, help="Number of past days to include.")
+    parser.add_argument("--days-back", type=int, default=6, help="Number of past days to include.")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -371,6 +463,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """
+    CLI entry point: parse arguments and run the daily job using those settings.
+    """
     args = _parse_args()
     run_daily_job(days_back=args.days_back, dry_run=args.dry_run)
 
