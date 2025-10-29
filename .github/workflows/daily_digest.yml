@@ -7,8 +7,12 @@ on:
 
 jobs:
   digest:
+    name: "digest - ${{ github.ref_name }}"
+    if: github.event_name != 'schedule' || github.ref_name == 'main'
     runs-on: ubuntu-latest
     steps:
+      - name: Echo context
+        run: echo "Running on ${{ github.ref_name }}"
       - uses: actions/checkout@v4
       - name: Setup Python
         uses: actions/setup-python@v5
