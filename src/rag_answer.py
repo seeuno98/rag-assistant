@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 from pathlib import Path
 from typing import List, Optional
 
@@ -319,12 +320,53 @@ def answer_question(
             )
 
     docs_sorted = sorted(hits, key=lambda h: h.get("score", 0.0), reverse=True)
-    top_docs = docs_sorted[:DEFAULT_TOP_K]
-    if len(top_docs) == 0:
+    if not docs_sorted:
+        return _finish("No relevant research found in the last 24 hours.")
+
+    def _dedupe_key(doc: dict) -> str:
+        arxiv_id = (doc.get("arxiv_id") or doc.get("paper_id") or "").strip().lower()
+        if arxiv_id:
+            arxiv_id = arxiv_id.replace("arxiv:", "")
+            return f"arxiv:{arxiv_id.split('v')[0]}"
+
+        source = (doc.get("source") or doc.get("id") or doc.get("paper_url") or "").strip().lower()
+        match = re.search(r"arxiv\.org/(?:abs|pdf)/([^?#]+)", source)
+        if match:
+            identifier = match.group(1).replace("arxiv:", "")
+            return f"arxiv:{identifier.split('v')[0]}"
+
+        doi = (doc.get("doi") or doc.get("paper_doi") or "").strip().lower()
+        if doi:
+            return f"doi:{doi}"
+
+        title = (doc.get("title") or "").strip().lower()
+        title = re.sub(r"[\s\-_:;,.()\[\]{}]+", " ", title)
+        return f"title:{title}"
+
+    unique_docs: list[dict] = []
+    seen_keys: set[str] = set()
+    for doc in docs_sorted:
+        key = _dedupe_key(doc)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        unique_docs.append(doc)
+
+    if not unique_docs:
+        return _finish("No relevant research found in the last 24 hours.")
+
+    summary_docs = unique_docs[:DEFAULT_TOP_K]
+    if k is None or k <= 0:
+        context_docs = summary_docs
+    else:
+        context_docs = unique_docs[: min(k, len(unique_docs))]
+
+    max_summary = len(summary_docs)
+    if max_summary <= 0:
         return _finish("No relevant research found in the last 24 hours.")
 
     retrieved_sections: list[str] = []
-    for idx, doc in enumerate(top_docs, 1):
+    for idx, doc in enumerate(context_docs, 1):
         title = doc.get("title") or doc.get("source") or f"Document {idx}"
         url = doc.get("source") or ""
         snippet = _clamp_text(doc.get("text") or "", CONTEXT_CHAR_LIMIT)
@@ -350,12 +392,12 @@ def answer_question(
         f"{context}\n\n"
         "Task:\n"
         f"{question}\n\n"
-        f"Summarize up to {len(top_docs)} papers as grounded bullet points. Each bullet must be formatted exactly as '<li><b><a href=\"URL\" target=\"_blank\" rel=\"noopener noreferrer\">Paper Title</a></b>: 1–2 sentence summary grounded in the retrieved context</li>'."
+        f"Summarize up to {max_summary} papers as grounded bullet points. Each bullet must be formatted exactly as '<li><b><a href=\"URL\" target=\"_blank\" rel=\"noopener noreferrer\">Paper Title</a></b>: 1–2 sentence summary grounded in the retrieved context</li>'."
     )
 
     try:
         if resolved_provider == "openai":
-            answer = _call_openai(context, question, openai_model, len(top_docs))
+            answer = _call_openai(context, question, openai_model, max_summary)
         else:
             answer = _call_huggingface(hf_prompt, hf_token or "")
     except requests.RequestException as exc:

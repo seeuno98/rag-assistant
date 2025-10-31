@@ -403,6 +403,8 @@ def run_daily_job(
         print(f"No new papers found in the last {effective_days_back} day(s).")
         return
 
+    num_papers = len(prepared_papers)
+
     logger.info("[INGEST] Streaming PDFs and chunking text")
     ingest_args = [
         "ingest_stream.py",
@@ -442,6 +444,7 @@ def run_daily_job(
         query,
         provider="openai",
         openai_model="gpt-4o-mini",
+        k=num_papers,
         include_context=True,
     )
     if isinstance(result, tuple):
