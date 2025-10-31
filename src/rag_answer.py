@@ -62,7 +62,13 @@ OPENAI_SYSTEM_PROMPT = (
     "- No external knowledge.\n"
     "- One bullet per paper.\n"
     "- Each bullet MUST be an HTML <li><b><a href=\"URL\" target=\"_blank\" rel=\"noopener noreferrer\">Paper Title</a></b>: 1–2 sentence summary grounded in context.</li>\n"
-    "- Do not invent details not in context."
+    "- Do not invent details not in context.\n"
+    "- No duplicates. Treat items as the same paper if ANY of these match:\n"
+    "  (a) same arXiv id root (e.g., 2501.12345v1 and 2501.12345v3),\n"
+    "  (b) same DOI,\n"
+    "  (c) highly similar titles (case-insensitive, ignore punctuation/parenthetical suffixes).\n"
+    "- If duplicates appear in context, summarize the paper only once. Prefer the newest version link (latest arXiv version or publisher DOI) and the clearest title.\n"
+    "- If deduplication reduces the number of bullets below the requested cap, DO NOT invent extra items; output fewer bullets."
 )
 
 
@@ -123,7 +129,8 @@ def _call_openai(context: str, query: str, model_id: str, max_papers: int) -> st
                 "content": (
                     f"Context (ordered as retrieved):\n{context}\n\n"
                     f"Task: {query}\n\n"
-                    f"Summarize up to {max_papers} papers as grounded bullet points. Each bullet must be formatted exactly as '<li><b><a href=\"URL\" target=\"_blank\" rel=\"noopener noreferrer\">Paper Title</a></b>: 1–2 sentence summary grounded in the retrieved context</li>' using only retrieved details."
+                    f"Summarize up to {max_papers} papers as grounded bullet points. Each bullet must be formatted exactly as '<li><b><a href=\"URL\" target=\"_blank\" rel=\"noopener noreferrer\">Paper Title</a></b>: 1–2 sentence summary grounded in the retrieved context</li>' using only retrieved details.\n"
+                    "Deduplicate strictly by arXiv id root / DOI / near-identical titles; include each paper at most once using its most canonical, newest link."
                 ),
             },
         ],
@@ -229,10 +236,10 @@ def answer_question(
     metadata_path: Path = DEFAULT_METADATA_PATH,
     embed_model_name: str = DEFAULT_MODEL_NAME,
     openai_model: str = DEFAULT_OPENAI_MODEL,
-) -> str:
+    include_context: bool = False,
+) -> str | tuple[str, str]:
     """
-    Given a textual question, retrieve relevant context chunks and invoke the LLM
-    to generate an answer or summary.
+    Given a textual question, retrieve relevant context chunks and invoke the LLM to generate an answer.
 
     Args:
         question (str): The user’s query.
@@ -242,15 +249,21 @@ def answer_question(
         index_path (Path): Location of the FAISS index file.
         metadata_path (Path): Location of the metadata JSON file.
         embed_model_name (str): Embedding model used when the index was built.
+        openai_model (str): Chat completion model for OpenAI provider.
+        include_context (bool): When True, return a tuple of (answer, retrieved_context_text).
 
     Returns:
-        str: The generated answer or summary text (including context for reference).
+        str | tuple[str, str]: Answer text, optionally paired with the retrieval context string.
     """
     if not question or not question.strip():
         raise ValueError("Question cannot be empty.")
 
     question = question.strip()
     provider_choice = provider.lower() if provider else None
+    context: str = ""
+
+    def _finish(value: str) -> str | tuple[str, str]:
+        return (value, context) if include_context else value
 
     try:
         index, metadata, embed_model = load_faiss_index(
@@ -259,22 +272,24 @@ def answer_question(
             embed_model_name,
         )
     except FileNotFoundError as exc:
-        return (
+        return _finish(
             f"Vector index is missing ({exc}). Please build the index first "
             "with `python src/embed_index.py --build --input data/chunks.jsonl`."
         )
     except Exception as exc:  # pragma: no cover - defensive guard
         logger.error("Failed to load FAISS index: %s", exc)
-        return "Sorry, I ran into an unexpected error while loading the vector index. Please try rebuilding it."
+        return _finish(
+            "Sorry, I ran into an unexpected error while loading the vector index. Please try rebuilding it."
+        )
 
     try:
         hits = search_index(index, embed_model, metadata, question, k=k)
     except Exception as exc:  # pragma: no cover - unexpected retrieval failures
         logger.error("Search failed: %s", exc)
-        return "Sorry, something went wrong while searching the index. Please rebuild and try again."
+        return _finish("Sorry, something went wrong while searching the index. Please rebuild and try again.")
 
     if not hits:
-        return (
+        return _finish(
             "Sorry, I couldn't find any matching context for that question. "
             "Try re-building the embeddings or fetching newer papers."
         )
@@ -286,11 +301,11 @@ def answer_question(
     resolved_provider: Optional[str] = None
     if provider_choice == "openai":
         if not openai_key:
-            return "OpenAI provider selected, but OPENAI_API_KEY is not set."
+            return _finish("OpenAI provider selected, but OPENAI_API_KEY is not set.")
         resolved_provider = "openai"
     elif provider_choice == "hf":
         if not hf_token:
-            return "Hugging Face provider selected, but HF_TOKEN is not set."
+            return _finish("Hugging Face provider selected, but HF_TOKEN is not set.")
         resolved_provider = "hf"
     else:
         if openai_key:
@@ -298,7 +313,7 @@ def answer_question(
         elif hf_token:
             resolved_provider = "hf"
         else:
-            return (
+            return _finish(
                 "No LLM provider configured. Set OPENAI_API_KEY for OpenAI or HF_TOKEN for Hugging Face "
                 "before running the assistant."
             )
@@ -306,7 +321,7 @@ def answer_question(
     docs_sorted = sorted(hits, key=lambda h: h.get("score", 0.0), reverse=True)
     top_docs = docs_sorted[:DEFAULT_TOP_K]
     if len(top_docs) == 0:
-        return "No relevant research found in the last 24 hours."
+        return _finish("No relevant research found in the last 24 hours.")
 
     retrieved_sections: list[str] = []
     for idx, doc in enumerate(top_docs, 1):
@@ -320,7 +335,6 @@ def answer_question(
         retrieved_sections.append("\n".join(section_lines))
 
     context = "Retrieved papers:\n" + "\n".join(retrieved_sections)
-    context_for_hf = context
 
     hf_prompt = (
         "You are a research summarization assistant. You MUST summarize ONLY the information found in the retrieved context below.\n"
@@ -333,7 +347,7 @@ def answer_question(
         "- If multiple topics appear, summarize each separately.\n"
         "- If context is irrelevant to the query, say “The retrieved documents do not contain enough information.”\n\n"
         "Context (ordered as retrieved):\n"
-        f"{context_for_hf}\n\n"
+        f"{context}\n\n"
         "Task:\n"
         f"{question}\n\n"
         f"Summarize up to {len(top_docs)} papers as grounded bullet points. Each bullet must be formatted exactly as '<li><b><a href=\"URL\" target=\"_blank\" rel=\"noopener noreferrer\">Paper Title</a></b>: 1–2 sentence summary grounded in the retrieved context</li>'."
@@ -346,13 +360,13 @@ def answer_question(
             answer = _call_huggingface(hf_prompt, hf_token or "")
     except requests.RequestException as exc:
         logger.error("Provider network request failed: %s", exc)
-        return (
+        return _finish(
             "I hit a network issue while contacting the language model provider. "
             "Please check your connection and try again."
         )
     except Exception as exc:  # pragma: no cover - catch-all for provider failures
         logger.exception("Provider call failed")
-        return "Sorry, the language model provider returned an error. Please try again later."
+        return _finish("Sorry, the language model provider returned an error. Please try again later.")
 
     answer = answer.strip() or "The language model returned an empty response."
     if resolved_provider == "hf":
@@ -363,7 +377,7 @@ def answer_question(
             or "weekly newsquiz" in lowered
         ):
             answer = "I do not know."
-    return answer
+    return _finish(answer)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -406,8 +420,13 @@ def main() -> None:
         metadata_path=args.metadata_path,
         embed_model_name=args.embed_model,
         openai_model=args.model,
+        include_context=False,
     )
-    print(response)  # noqa: T201
+    if isinstance(response, tuple):
+        response_text, _ = response
+    else:
+        response_text = response
+    print(response_text)  # noqa: T201
 
 
 if __name__ == "__main__":

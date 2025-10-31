@@ -4,7 +4,9 @@
 [![arXiv Powered](https://img.shields.io/badge/Data-arXiv-orange)](https://arxiv.org)
 
 
-RAG Assistant is an end-to-end **automated Retrieval-Augmented Generation (RAG)** system that continuously fetches the newest **LLM-related research papers** from **arXiv**, processes them on the fly, and enables **interactive question-answering and daily summarization** of emerging AI research trends.  
+RAG Assistant is an end-to-end **automated Retrieval-Augmented Generation (RAG)** system that continuously fetches the newest **LLM-related research papers** from **arXiv**, processes them on the fly, and enables **interactive question-answering and weekly summarization** of emerging AI research trends (with an optional high-frequency daily mode).  
+
+> 📉 **Why weekly by default?** We observed that the general LLM query and topic-specific prompts rarely surface enough fresh papers every single day to produce meaningful digests. Switching the automation to a weekly cadence yields richer, less repetitive summaries while still allowing on-demand daily runs when research volume spikes.
 
 This project demonstrates how to combine **retrieval**, **generation**, and **automation** to build a real-world research assistant — fully open-source and cloud-ready.
 
@@ -34,7 +36,7 @@ This project demonstrates how to combine **retrieval**, **generation**, and **au
 - **Vector Embeddings** – Converts text into dense semantic vectors via `sentence-transformers` (e.g., `all-MiniLM-L6-v2`).
 - **Semantic Retrieval** – Retrieves the most relevant paper segments via FAISS or Pinecone vector stores.
 - **LLM Response Generation** – Combines retrieved research context with an LLM (OpenAI or Hugging Face) for accurate answers and summaries.
-- **Automated Daily Digest** – Generates a concise markdown summary (“LLM Research Digest”) of new papers each day.
+- **Automated Research Digests** – Generates concise “LLM Research Digest” summaries on a weekly cadence (with an optional daily fast mode for high-volume periods).
 - **Cloud-First Workflow** – Streams data from arXiv (no local raw file storage needed).
 
 ---
@@ -49,7 +51,7 @@ This project demonstrates how to combine **retrieval**, **generation**, and **au
 | NLP Models | `sentence-transformers`, `transformers` |
 | Vector Store | FAISS / Pinecone |
 | LLM Backend | OpenAI GPT-4o-mini (default) / Hugging Face (facebook/bart-large-cnn only for testing) |
-| Automation | `cron` / GitHub Actions (daily refresh) |
+| Automation | `cron` / GitHub Actions (weekly refresh, daily optional) |
 
 ---
 
@@ -62,10 +64,11 @@ rag-assistant/
 │ ├── ingest_stream.py # Stream, parse, and chunk PDF text
 │ ├── embed_index.py # Build FAISS index & store metadata
 │ ├── rag_answer.py # Query, retrieve, and generate LLM-based answers
-│ ├── scheduler_daily.py # Automate daily index refresh + digest summary
+│ ├── scheduler_daily.py # Optional daily index refresh + digest summary (shared pipeline)
+│ ├── scheduler_weekly.py # Weekly wrapper (default cadence) that reuses the shared scheduler logic
 │ └── utils/clean.py # Optional text cleanup helpers
 ├── indexes/ # FAISS index + metadata JSON
-├── reports/ # Daily LLM Digest markdown files
+├── reports/ # LLM Digest markdown files
 ├── requirements.txt
 ├── .env # API keys and configuration
 └── README.md
@@ -131,7 +134,7 @@ python src/embed_index.py
 
 4. Ask Questions
 ```bash
-python src/rag_answer.py --provider openai --model gpt-4o-mini --query "Summarize latest LLM retrieval methods."
+python src/rag_answer.py --provider openai --model gpt-4o-mini --query "Summarize the latest research on large language models (methods, training, alignment/safety, evaluation, efficiency, multimodal, and applications). Provide concise, linked bullets."
 ```
 
 ## 🧪 Quick Module Tests
@@ -182,7 +185,7 @@ HF_TOKEN=hf_xxx
 
 ```bash
 # Using OpenAI GPT-4o-mini (default)
-OPENAI_API_KEY=sk-xxxx python src/rag_answer.py --provider openai --model gpt-4o-mini --query "Summarize latest LLM retrieval methods."
+OPENAI_API_KEY=sk-xxxx python src/rag_answer.py --provider openai --model gpt-4o-mini --query "Summarize the latest research on large language models (methods, training, alignment/safety, evaluation, efficiency, multimodal, and applications). Provide concise, linked bullets."
 
 # Legacy Hugging Face testing only (facebook/bart-large-cnn)
 HF_TOKEN=hf_xxx python src/rag_answer.py --provider hf --query "Summarize latest LLM retrieval methods."
@@ -190,58 +193,57 @@ HF_TOKEN=hf_xxx python src/rag_answer.py --provider hf --query "Summarize latest
 > Note: `--provider hf` is kept only for regression testing with `facebook/bart-large-cnn`. All production runs should use `--provider openai`.
 ```
 
-### 5. Run Daily Digest
+### 5. Run Weekly Digest (default)
 ```bash
-python src/scheduler_daily.py --days-back 1 --dry-run
+python src/scheduler_weekly.py --days-back 7 --dry-run
 ```
 
 Full scheduler run (writes reports/YYYY-MM-DD-llm-digest.md): 
 
 ```bash
-OPENAI_API_KEY=sk-xxxx python src/scheduler_daily.py --days-back 1
+OPENAI_API_KEY=sk-xxxx python src/scheduler_weekly.py --days-back 7
 ```
+
+Need a higher-frequency readout?
+```bash
+python src/scheduler_daily.py --days-back 1 --dry-run
+```
+
 
 </details>
 
 ## 📬 Automated Research Digest
 
-- Runs automatically at **09:00 UTC** via the GitHub Actions workflow in `.github/workflows/daily_digest.yml`.
-- Weekday rotation (UTC):
-  - **Monday:** Summarize latest LLM retrieval methods.
-  - **Tuesday:** Summarize latest multi-modal LLM research.
-  - **Wednesday:** Summarize latest LLM fine-tuning and alignment papers.
-  - **Thursday:** Summarize latest reinforcement learning or policy optimization in LLMs.
-  - **Friday:** Summarize latest evaluation benchmarks for large language models.
-  - **Saturday:** Summarize latest LLM efficiency and inference optimization research.
-  - **Sunday:** Summarize latest applications of LLMs in reasoning and agents.
+- Runs automatically at **09:00 UTC each Monday** via the GitHub Actions workflow in `.github/workflows/daily_digest.yml` (switch the command to `scheduler_daily.py` if you want the higher-frequency mode).
+- Uses a single **generic LLM mega-query** (`GENERIC_LLM_QUERY`) that covers methods, training, alignment/safety, evaluation, efficiency, multimodal work, and applications in one pass.
+- Applies strict deduplication (arXiv id root / DOI / near-identical titles) before emitting HTML bullets so each paper appears once with its newest canonical link.
+- Weekly emails and HTML reports label the reporting window as `MMM DD, YYYY - MMM DD, YYYY (XTH WEEK)` so you can see coverage at a glance.
 - Email delivery uses the following GitHub Secrets (all required unless noted):
   - `OPENAI_API_KEY`
   - `EMAIL_SENDER`
   - `EMAIL_PASSWORD`
   - `EMAIL_RECEIVER`
   - Optional overrides: `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`
-- Each digest is sent as a multipart message (plain text + HTML) with the daily summary attached.
+- Each digest is sent as a multipart message (plain text + HTML) with the weekly summary attached (the daily variant shares the same format when invoked manually).
 
 ## ⚡ Automation
 
-You can automate daily updates and summaries using:
+You can automate weekly updates and summaries using:
 
 GitHub Actions (recommended):
-Run python src/scheduler_daily.py on a daily cron to:
+Run `python src/scheduler_weekly.py` on a weekly cron to:
 
 - Fetch new papers
-
 - Rebuild embeddings
-
 - Generate a new LLM Research Digest in /reports/ (summaries generated with OpenAI gpt-4o-mini)
 
 
 ### Example GitHub Action (cron.yaml)
 ```yaml
-name: Daily Digest
+name: Weekly Digest
 on:
   schedule:
-    - cron: "0 14 * * *"  # every day at 14:00 UTC
+    - cron: "0 14 * * MON"  # every Monday at 14:00 UTC
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -252,8 +254,16 @@ jobs:
         with:
           python-version: "3.10"
       - run: pip install -r requirements.txt
-      - run: python src/scheduler_daily.py
+      - run: python src/scheduler_weekly.py
 ```
+
+Need faster iterations? Replace the final step with `python src/scheduler_daily.py` and adjust the cron to `0 14 * * *`.
+
+## Modes & Branches
+
+- `main` (stable): runs **Auto Generic** weekly — fetches recent LLM papers; if a topic is requested and relevant sources ≥ N, it applies a topic lens, otherwise falls back to generic safely.
+- `feature/topic-digests`: current **multi-topic** prototype (may drift off-topic).
+- `feature/auto-generic`: in-progress refactor for **Auto mode** with hybrid retrieval, reranker, and guardrails.
 
 ## 📈 Roadmap
 
@@ -265,7 +275,7 @@ jobs:
 
 - Enhance summarization metrics (faithfulness, recall)
 
-- Deploy Daily Digest to Slack / Discord
+- Deploy Weekly Digest to Slack / Discord
 
 - vLLM or Triton serving for low-latency LLM responses
 
