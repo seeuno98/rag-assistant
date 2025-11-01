@@ -1,9 +1,19 @@
-name: Daily Research Digest
+name: Research Digests (Weekly Default)
 
 on:
   schedule:
-    - cron: "0 16 * * *"
+    # Default cadence: every Monday at 14:00 UTC
+    - cron: "0 14 * * MON" 
   workflow_dispatch:
+    inputs:
+      cadence:
+        description: "Override cadence when dispatching manually (weekly|daily)."
+        required: false
+        default: "weekly"
+        type: choice
+        options:
+          - weekly
+          - daily
 
 jobs:
   digest:
@@ -20,11 +30,25 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: "🚀 Run daily scheduler"
+      - name: Resolve cadence
+        id: cadence
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.cadence }}" == "daily" ]]; then
+            echo "cadence=daily" >> "$GITHUB_OUTPUT"
+          else
+            echo "cadence=weekly" >> "$GITHUB_OUTPUT"
+          fi
+      - name: "🚀 Run digest scheduler"
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVER: ${{ secrets.EMAIL_RECEIVER }}
         run: |
-          python src/scheduler_daily.py
+          if [[ "${{ steps.cadence.outputs.cadence }}" == "daily" ]]; then
+            echo "Running optional daily digest (manual dispatch)."
+            python src/scheduler_daily.py
+          else
+            echo "Running weekly digest (default cadence)."
+            python src/scheduler_weekly.py
+          fi

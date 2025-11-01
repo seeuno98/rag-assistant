@@ -4,7 +4,7 @@ scheduler_daily.py
 Automates the daily RAG pipeline end-to-end and dispatches a themed research digest.
 
 Responsibilities:
-- Rotate through weekday queries to target different LLM sub-domains.
+- Issue the generic large language model research query for daily summaries.
 - Fetch the newest arXiv papers, stream and chunk PDFs, and rebuild the FAISS index.
 - Call rag_answer.py to produce the templated Summary/Overall response used in reports.
 - Parse either HTML or Markdown bullets into structured digest items with links.
@@ -21,39 +21,70 @@ Output:
 
 import argparse
 import html
-import io
 import json
 import logging
 import os
 import smtplib
 import ssl
 import sys
-from contextlib import redirect_stdout
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
+from typing import Callable, Optional
 import re
 
-DAILY_QUERIES = {
-    0: "Summarize latest LLM retrieval methods.",
-    1: "Summarize latest multi-modal LLM research.",
-    2: "Summarize latest LLM fine-tuning and alignment papers.",
-    3: "Summarize latest reinforcement learning or policy optimization in LLMs.",
-    4: "Summarize latest evaluation benchmarks for large language models.",
-    5: "Summarize latest LLM efficiency and inference optimization research.",
-    6: "Summarize latest applications of LLMs in reasoning and agents.",
-}
+from rag_answer import answer_question
+
+GENERIC_LLM_QUERY = (
+    "Summarize the latest research on large language models (methods, training, alignment/safety, evaluation, "
+    "efficiency, multimodal, and applications). Provide concise, linked bullets."
+)
+
+
+def ordinal(n: int) -> str:
+    """Convert an integer into an ordinal string (1 -> '1st')."""
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+@dataclass(frozen=True)
+class DigestConfig:
+    """Configuration bundle controlling digest labeling, defaults, and formatting."""
+
+    label: str
+    default_days_back: int
+    intro_line: Callable[[datetime, date, str], str]
+    html_heading: Callable[[datetime, date], str]
+    html_date_line: Callable[[datetime, date], str]
+    schedule_note: str
+    subject_line: Callable[[datetime, date, str], str]
+    markdown_title: Callable[[datetime, date, str], str]
+
+
+DAILY_CONFIG = DigestConfig(
+    label="Daily",
+    default_days_back=6,
+    intro_line=lambda run_dt, _start_date, topic: f"[Daily RAG Digest] {run_dt:%A} – {topic}",
+    html_heading=lambda run_dt, _start_date: "Daily RAG Digest",
+    html_date_line=lambda run_dt, _start_date: run_dt.strftime("%A, %b %d, %Y"),
+    schedule_note="You’re receiving this because you enabled the GitHub Action for daily research summaries.",
+    subject_line=lambda run_dt, _start_date, topic: f"[Daily RAG Digest] {run_dt:%A} – {topic}",
+    markdown_title=lambda run_dt, _start_date, body: (
+        f"# 🧠 LLM Research Digest — {run_dt.date().isoformat()}\n\n{body}\n"
+    ),
+)
 
 
 def get_daily_query() -> str:
     """
-    Return the templated summarization query for the current weekday in UTC.
+    Return the templated summarization query used for the daily digest.
 
     Returns:
-        str: Scheduler prompt corresponding to the weekday (0=Monday … 6=Sunday).
+        str: Scheduler prompt covering the current landscape of LLM research.
     """
-    return DAILY_QUERIES[datetime.utcnow().weekday()]
+    return GENERIC_LLM_QUERY
 
 
 def _run_module_main(module, argv: list[str]) -> None:
@@ -85,7 +116,7 @@ def topic_from_query(q: str) -> str:
         str: Human-friendly topic text capped at 120 characters.
     """
     t = q.strip()
-    for pref in ("Summarize latest ", "summarize latest "):
+    for pref in ("Summarize latest ", "summarize latest ", "Summarize the latest ", "summarize the latest "):
         if t.startswith(pref):
             t = t[len(pref) :]
     return t.rstrip(".")[:120]
@@ -119,7 +150,14 @@ def parse_summary_items(answer_html: str) -> list[dict]:
     return items
 
 
-def build_digest_text(summary_items: list[dict], topic: str, run_dt: datetime, fallback: str | None = None) -> str:
+def build_digest_text(
+    summary_items: list[dict],
+    topic: str,
+    run_dt: datetime,
+    period_start: date,
+    config: DigestConfig,
+    fallback: str | None = None,
+) -> str:
     """
     Render the plain-text digest body shared via email and reports.
 
@@ -127,13 +165,15 @@ def build_digest_text(summary_items: list[dict], topic: str, run_dt: datetime, f
         summary_items (list[dict]): Structured summaries from `parse_summary_items`.
         topic (str): Digest topic label (e.g., "LLM retrieval methods").
         run_dt (datetime): Execution timestamp (UTC).
+        period_start (date): Beginning of the reporting window.
+        config (DigestConfig): Formatting configuration controlling labels and headings.
         fallback (str | None): Raw summary text to use when parsing fails.
 
     Returns:
         str: Plain-text digest containing heading and bullet list.
     """
     lines: list[str] = []
-    lines.append(f"[Daily RAG Digest] {run_dt:%A} – {topic}")
+    lines.append(config.intro_line(run_dt, period_start, topic))
     lines.append("")
     lines.append("Summary:")
     if summary_items:
@@ -150,7 +190,15 @@ def build_digest_text(summary_items: list[dict], topic: str, run_dt: datetime, f
     return "\n".join(lines)
 
 
-def build_digest_html(summary_items: list[dict], topic: str, run_dt: datetime, fallback: str | None = None) -> str:
+def build_digest_html(
+    summary_items: list[dict],
+    topic: str,
+    run_dt: datetime,
+    period_start: date,
+    config: DigestConfig,
+    fallback: str | None = None,
+    context: str | None = None,
+) -> str:
     """
     Render the HTML digest body with lightweight styling for email clients.
 
@@ -158,13 +206,17 @@ def build_digest_html(summary_items: list[dict], topic: str, run_dt: datetime, f
         summary_items (list[dict]): Structured summaries from `parse_summary_items`.
         topic (str): Digest topic label.
         run_dt (datetime): Execution timestamp (UTC).
+        period_start (date): Beginning of the reporting window.
+        config (DigestConfig): Formatting configuration controlling labels and headings.
         fallback (str | None): Raw summary text to display when parsing fails.
+        context (str | None): Retrieved context to surface during dry runs.
 
     Returns:
         str: Sanitized HTML string ready to embed in an email.
     """
-    safe_topic = html.escape(topic)
-    date_str = html.escape(run_dt.strftime("%A, %b %d, %Y"))
+    heading_title = html.escape(config.html_heading(run_dt, period_start))
+    date_line = html.escape(config.html_date_line(run_dt, period_start))
+    schedule_note = html.escape(config.schedule_note)
     if summary_items:
         bullet_entries: list[str] = []
         for item in summary_items:
@@ -186,6 +238,13 @@ def build_digest_html(summary_items: list[dict], topic: str, run_dt: datetime, f
     else:
         bullet_html = '<li style="margin-bottom:12px; line-height:1.5;">No structured summary available.</li>'
 
+    context_block = ""
+    if context:
+        context_block = (
+            "<h2 style=\"font-size:16px;margin:24px 0 8px 0;\">Retrieved Context (Dry Run)</h2>"
+            f"<pre style=\"background:#f5f5f5;padding:12px;border-radius:8px;white-space:pre-wrap;font-size:12px;line-height:1.4;\">{html.escape(context)}</pre>"
+        )
+
     return f"""<!doctype html>
     <html>
     <head><meta charset=\"utf-8\"></head>
@@ -194,16 +253,15 @@ def build_digest_html(summary_items: list[dict], topic: str, run_dt: datetime, f
         <tr><td align=\"center\" style=\"padding:24px;\">
           <table width=\"640\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#ffffff;border-radius:12px;padding:24px;font-family:Arial,Helvetica,sans-serif;color:#111;\">
             <tr><td>
-              <h1 style=\"margin:0 0 8px 0;font-size:20px;\">Daily RAG Digest — {safe_topic}</h1>
-              <div style=\"color:#666;font-size:12px;margin-bottom:16px;\">{date_str}</div>
+              <h1 style=\"margin:0 0 8px 0;font-size:20px;\">{heading_title}</h1>
+              <div style=\"color:#666;font-size:12px;margin-bottom:4px;\">{date_line}</div>
               <h2 style=\"font-size:16px;margin:0 0 12px 0;\">Summary</h2>
               <ul style=\"padding-left:18px;margin:0;list-style-type:disc;\">
                 {bullet_html}
               </ul>
+              {context_block}
               <hr style=\"margin:20px 0;border:none;border-top:1px solid #eee;\">
-              <div style=\"font-size:12px;color:#666;\">
-                You’re receiving this because you enabled the GitHub Action for daily research summaries.
-              </div>
+              <div style=\"font-size:12px;color:#666;\">{schedule_note}</div>
             </td></tr>
           </table>
         </td></tr>
@@ -273,13 +331,19 @@ def extract_answer(summary_text: str) -> str:
     return summary_text[idx + len(marker) :].strip()
 
 
-def run_daily_job(days_back: int = 6, dry_run: bool = False) -> None:
+def run_daily_job(
+    days_back: Optional[int] = None,
+    dry_run: bool = False,
+    *,
+    config: DigestConfig = DAILY_CONFIG,
+) -> None:
     """
-    Execute the end-to-end daily pipeline and optionally send/email the digest.
+    Execute the end-to-end digest pipeline and optionally send/email the digest.
 
     Args:
-        days_back (int): Number of historical days to include when fetching papers.
+        days_back (int | None): Number of historical days to include when fetching papers.
         dry_run (bool): If True, skip email send and persist artifacts locally.
+        config (DigestConfig): Formatting and schedule configuration; defaults to daily digest.
 
     Side Effects:
         Writes artifacts under `data/`, `indexes/`, `reports/`, and optionally `artifacts/`.
@@ -287,14 +351,16 @@ def run_daily_job(days_back: int = 6, dry_run: bool = False) -> None:
     logger = logging.getLogger(__name__)
     logging.basicConfig(level=logging.INFO)
 
+    effective_days_back = config.default_days_back if days_back is None else days_back
+
     if dry_run:
         logger.info("[DRY-RUN] Running scheduler without sending email (artifacts will be saved).")
 
-    logger.info("[FETCH] Fetching latest papers (days_back=%s)", days_back)
+    logger.info("[FETCH] Fetching latest papers (days_back=%s)", effective_days_back)
     fetch_args = [
         "fetch_arxiv.py",
         "--days-back",
-        str(days_back),
+        str(effective_days_back),
         "--output",
         "data/arxiv_results.json",
     ]
@@ -316,7 +382,7 @@ def run_daily_job(days_back: int = 6, dry_run: bool = False) -> None:
         return
 
     if not papers_raw:
-        print(f"No new papers found in the last {days_back} day(s).")
+        print(f"No new papers found in the last {effective_days_back} day(s).")
         return
 
     prepared_papers = []
@@ -334,8 +400,10 @@ def run_daily_job(days_back: int = 6, dry_run: bool = False) -> None:
         )
 
     if not prepared_papers:
-        print(f"No new papers found in the last {days_back} day(s).")
+        print(f"No new papers found in the last {effective_days_back} day(s).")
         return
+
+    num_papers = len(prepared_papers)
 
     logger.info("[INGEST] Streaming PDFs and chunking text")
     ingest_args = [
@@ -371,25 +439,30 @@ def run_daily_job(days_back: int = 6, dry_run: bool = False) -> None:
 
     logger.info("[SUMMARIZE] Generating summary via OpenAI gpt-4o-mini")
     query = get_daily_query()
-    summary_buffer = io.StringIO()
-    summarize_args = [
-        "rag_answer.py",
-        "--provider",
-        "openai",
-        "--model",
-        "gpt-4o-mini",
-        "--query",
+    retrieval_context = ""
+    result = answer_question(
         query,
-    ]
-    with redirect_stdout(summary_buffer):
-        _run_module_main("rag_answer", summarize_args)
-
-    summary_text = summary_buffer.getvalue().strip()
+        provider="openai",
+        openai_model="gpt-4o-mini",
+        k=num_papers,
+        include_context=True,
+    )
+    if isinstance(result, tuple):
+        summary_text, retrieval_context = result
+    else:
+        summary_text = result
+        retrieval_context = ""
+    summary_text = (summary_text or "").strip()
     if not summary_text:
         logger.warning("[SUMMARIZE] Summary output was empty.")
         return
 
     run_dt = datetime.now(timezone.utc)
+    period_end = run_dt.date()
+    if effective_days_back and effective_days_back > 1:
+        period_start = period_end - timedelta(days=effective_days_back - 1)
+    else:
+        period_start = period_end
     topic = topic_from_query(query)
     summary_items = parse_summary_items(summary_text)
     fallback_summary = summary_text if summary_items else None
@@ -408,13 +481,21 @@ def run_daily_job(days_back: int = 6, dry_run: bool = False) -> None:
         digest_body = "Summary:\n" + "\n".join(bullet_lines)
     else:
         digest_body = fallback_summary or "No structured summary available."
-    digest_content = f"# 🧠 LLM Research Digest — {run_dt.date().isoformat()}\n\n{digest_body}\n"
+    digest_content = config.markdown_title(run_dt, period_start, digest_body)
     digest_path.write_text(digest_content, encoding="utf-8")
     logger.info("[SAVE] Digest written to %s", digest_path)
 
-    subject = f"[Daily RAG Digest] {run_dt:%A} – {topic}"
-    text_body = build_digest_text(summary_items, topic, run_dt, fallback_summary)
-    html_body = build_digest_html(summary_items, topic, run_dt, fallback_summary)
+    subject = config.subject_line(run_dt, period_start, topic)
+    text_body = build_digest_text(summary_items, topic, run_dt, period_start, config, fallback_summary)
+    html_body = build_digest_html(
+        summary_items,
+        topic,
+        run_dt,
+        period_start,
+        config,
+        fallback_summary,
+        retrieval_context if dry_run else None,
+    )
 
     if dry_run:
         artifacts_dir = Path("artifacts")
@@ -432,7 +513,7 @@ def run_daily_summary() -> None:
     """
     Backwards-compatible helper that proxies directly to `rag_answer.py`.
 
-    Invokes the current daily query using the OpenAI provider and prints the result.
+    Invokes the current digest query using the OpenAI provider and prints the result.
     """
     query = get_daily_query()
     _run_module_main(
@@ -457,7 +538,12 @@ def _parse_args() -> argparse.Namespace:
         argparse.Namespace: Namespace containing `days_back` and `dry_run`.
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days-back", type=int, default=6, help="Number of past days to include.")
+    parser.add_argument(
+        "--days-back",
+        type=int,
+        default=DAILY_CONFIG.default_days_back,
+        help=f"Number of past days to include (default: {DAILY_CONFIG.default_days_back}).",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -468,7 +554,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     """
-    CLI entry point: parse arguments and run the daily job using those settings.
+    CLI entry point: parse arguments and run the digest job using those settings.
     """
     args = _parse_args()
     run_daily_job(days_back=args.days_back, dry_run=args.dry_run)
