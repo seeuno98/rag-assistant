@@ -214,7 +214,7 @@ python src/scheduler_daily.py --days-back 1 --dry-run
 
 ## 📬 Automated Research Digest
 
-- Runs automatically at **09:00 UTC each Monday** via the GitHub Actions workflow in `.github/workflows/daily_digest.yml` (switch the command to `scheduler_daily.py` if you want the higher-frequency mode).
+- Runs automatically at **16:00 UTC each Monday** via the GitHub Actions workflow in `.github/workflows/daily_digest.yml` (switch the command to `scheduler_daily.py` if you want the higher-frequency mode).
 - Uses a single **generic LLM mega-query** (`GENERIC_LLM_QUERY`) that covers methods, training, alignment/safety, evaluation, efficiency, multimodal work, and applications in one pass.
 - Applies strict deduplication (arXiv id root / DOI / near-identical titles) before emitting HTML bullets so each paper appears once with its newest canonical link.
 - Weekly emails and HTML reports label the reporting window as `MMM DD, YYYY - MMM DD, YYYY (XTH WEEK)` so you can see coverage at a glance.
