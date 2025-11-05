@@ -3,7 +3,7 @@ name: Research Digests (Weekly Default)
 on:
   schedule:
     # Default cadence: every Monday at 14:00 UTC
-    - cron: "0 14 * * MON" 
+    - cron: "0 16 * * MON" 
   workflow_dispatch:
     inputs:
       cadence:
